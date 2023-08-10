@@ -1,0 +1,1 @@
+FROM public.ecr.aws/sam/build-go1.x:1.86.1
