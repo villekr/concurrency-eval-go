@@ -8,5 +8,8 @@ Go code for [How Do You Like Your Lambda Concurrency](https://ville-karkkainen.m
 # Build Deployment Package
 
 ```
-docker build --platform linux/amd64 -f docker/Dockerfile -t concurrency-eval-go .
+docker build -f docker/Dockerfile -t concurrency-eval-go .
+docker run -it --rm -v $(pwd):/app concurrency-eval-go bash
+cd /app
+./scripts/build.sh
 ```
