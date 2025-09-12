@@ -1,17 +1,18 @@
 package internal
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"io"
 	"math"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 )
 
 type Event struct {
@@ -27,9 +28,26 @@ type Response struct {
 	Time   float32 `json:"time"`
 }
 
+var (
+	s3Once   sync.Once
+	s3Client *s3.S3
+)
+
+func getS3Client() *s3.S3 {
+	s3Once.Do(func() {
+		sess, err := session.NewSessionWithOptions(session.Options{SharedConfigState: session.SharedConfigEnable})
+		if err != nil {
+			// In Lambda, panicking here will surface as init error; subsequent calls won't proceed.
+			panic(fmt.Errorf("failed to create AWS session: %w", err))
+		}
+		s3Client = s3.New(sess)
+	})
+	return s3Client
+}
+
 func HandleRequest(ctx context.Context, event Event) (*Response, error) {
 	start := time.Now()
-	result, err := processor(event)
+	result, err := processor(ctx, event)
 	if err != nil {
 		return nil, err
 	}
@@ -45,89 +63,104 @@ func HandleRequest(ctx context.Context, event Event) (*Response, error) {
 	return &response, nil
 }
 
-func processor(event Event) (*string, error) {
-	sess, err := session.NewSessionWithOptions(session.Options{
-		SharedConfigState: session.SharedConfigEnable,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	svc := s3.New(sess)
+func processor(ctx context.Context, event Event) (*string, error) {
+	svc := getS3Client()
 	bucketName := event.S3BucketName
 	folder := event.Folder
 	find := event.Find
 
+	// List all objects with pagination
+	var keys []string
 	listObjectsParams := &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucketName),
 		Prefix: aws.String(folder),
 	}
-	response, err := svc.ListObjectsV2(listObjectsParams)
-	if err != nil {
-		return nil, err
+	for {
+		resp, err := svc.ListObjectsV2WithContext(ctx, listObjectsParams)
+		if err != nil {
+			return nil, err
+		}
+		for _, obj := range resp.Contents {
+			if obj.Key != nil {
+				keys = append(keys, *obj.Key)
+			}
+		}
+		if aws.BoolValue(resp.IsTruncated) && resp.NextContinuationToken != nil {
+			listObjectsParams.ContinuationToken = resp.NextContinuationToken
+			continue
+		}
+		break
 	}
 
-	keys := make([]string, len(response.Contents))
-	for i, obj := range response.Contents {
-		keys[i] = *obj.Key
+	// If not searching for content, avoid downloads; just return count.
+	if find == nil {
+		result := strconv.Itoa(len(keys))
+		return &result, nil
 	}
 
-	responseChan := make(chan *string, len(keys))
+	// Search concurrently with bounded parallelism and early cancellation on first match.
+	const maxConcurrent = 32
+	sem := make(chan struct{}, maxConcurrent)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	resultCh := make(chan *string, 1)
 	var wg sync.WaitGroup
 
 	for _, key := range keys {
+		k := key
 		wg.Add(1)
-		go func(key string) {
+		sem <- struct{}{}
+		go func() {
 			defer wg.Done()
+			defer func() { <-sem }()
 
-			body, err := get(svc, bucketName, key, find)
+			match, err := get(ctx, svc, bucketName, k, find)
 			if err != nil {
+				// Log and continue; do not fail entire batch
 				fmt.Println("Error retrieving object:", err)
 				return
 			}
-			responseChan <- body
-		}(key)
+			if match != nil {
+				select {
+				case resultCh <- match:
+					cancel() // cancel remaining work
+				default:
+				}
+			}
+		}()
 	}
 
 	go func() {
 		wg.Wait()
-		close(responseChan)
+		close(resultCh)
 	}()
 
-	var responses []*string
-	for body := range responseChan {
-		responses = append(responses, body)
+	if match, ok := <-resultCh; ok {
+		return match, nil
 	}
-	if find != nil {
-		return indexOfNonNil(responses), nil
-	}
-	result := strconv.Itoa(len(responses))
-	return &result, nil
+	return nil, nil
 }
 
-func get(svc *s3.S3, bucketName, key string, find *string) (*string, error) {
+func get(ctx context.Context, svc *s3.S3, bucketName, key string, find *string) (*string, error) {
 	getObjectParams := &s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(key),
 	}
-	response, err := svc.GetObject(getObjectParams)
+	response, err := svc.GetObjectWithContext(ctx, getObjectParams)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
 
-	buf := new(bytes.Buffer)
-	_, err = buf.ReadFrom(response.Body)
+	// Only read the body if we need to search within it.
+	b, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, err
 	}
-
-	body := buf.String()
 	if find != nil {
-		index := strings.Index(body, *find)
-		if index >= 0 {
+		if strings.Contains(string(b), *find) {
 			return &key, nil
-		} else {
-			return nil, nil
 		}
 	}
 	return nil, nil
