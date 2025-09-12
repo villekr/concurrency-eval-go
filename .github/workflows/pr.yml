@@ -6,8 +6,8 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
-  build-and-test:
-    name: Go build, format, vet, and test
+  format-and-lint-check:
+    name: Go format and lint check
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
@@ -31,3 +31,6 @@ jobs:
             echo "$CHANGED" >&2
             exit 1
           fi
+
+      - name: Vet
+        run: go vet ./...

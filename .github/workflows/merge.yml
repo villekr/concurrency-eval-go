@@ -38,20 +38,22 @@ jobs:
           go-version: '1.25.x'
           cache: true
 
-      - name: Build Linux/arm64 zip
+      - name: Build Linux/arm64 bootstrap and zip
         run: |
           set -euxo pipefail
-          DIR="cmd"
           mkdir -p build
-          # Build for Linux/arm64
-          GOARCH=arm64 GOOS=linux go build -o "build/${DIR}" "./${DIR}"/*
+          pushd cmd/lambda
+          # Build for Linux/arm64 with AWS Lambda norpc tag, outputting 'bootstrap'
+          GOOS=linux GOARCH=arm64 go build -tags lambda.norpc -o bootstrap main.go
           # Ensure zip is available (Ubuntu runners usually have it, but install if missing)
           if ! command -v zip >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y zip
           fi
-          # Package as a zip archive (not gzip). -j to junk paths, -r recursive, -q quiet
-          (cd build && zip -jrq "${DIR}.zip" "${DIR}")
+          # Zip as function.zip containing only the bootstrap file
+          zip -q function.zip bootstrap
+          popd
+          mv cmd/lambda/function.zip build/function.zip
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -67,8 +69,9 @@ jobs:
           PREFIX: ${{ env.ARTIFACT_PREFIX }}
         run: |
           set -euxo pipefail
-          FUNC_KEY="${PREFIX}/cmd.zip"
-          FUNC_VERSION_ID=$(aws s3api put-object --bucket "$BUCKET" --key "$FUNC_KEY" --body build/cmd.zip --query 'VersionId' --output text)
+          ZIP_NAME="function.zip"
+          FUNC_KEY="${PREFIX}/${ZIP_NAME}"
+          FUNC_VERSION_ID=$(aws s3api put-object --bucket "$BUCKET" --key "$FUNC_KEY" --body build/${ZIP_NAME} --query 'VersionId' --output text)
           echo "code_s3_key=${FUNC_KEY}" >> "$GITHUB_OUTPUT"
           echo "code_s3_version=${FUNC_VERSION_ID}" >> "$GITHUB_OUTPUT"
 
