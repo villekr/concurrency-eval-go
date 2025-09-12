@@ -41,8 +41,17 @@ jobs:
       - name: Build Linux/arm64 zip
         run: |
           set -euxo pipefail
-          chmod +x scripts/build.sh
-          ./scripts/build.sh
+          DIR="cmd"
+          mkdir -p build
+          # Build for Linux/arm64
+          GOARCH=arm64 GOOS=linux go build -o "build/${DIR}" "./${DIR}"/*
+          # Ensure zip is available (Ubuntu runners usually have it, but install if missing)
+          if ! command -v zip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y zip
+          fi
+          # Package as a zip archive (not gzip). -j to junk paths, -r recursive, -q quiet
+          (cd build && zip -jrq "${DIR}.zip" "${DIR}")
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
