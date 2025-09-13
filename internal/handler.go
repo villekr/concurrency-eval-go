@@ -98,12 +98,12 @@ func processor(ctx context.Context, event Event) (*string, error) {
 	const maxConcurrent = 32
 	sem := make(chan struct{}, maxConcurrent)
 
-	// Only create a cancellable context if we might short-circuit on first match
-	var cancel context.CancelFunc = func() {}
-	if find != nil {
-		ctx, cancel = context.WithCancel(ctx)
-	}
+	// Always create a cancellable context; in count mode we just won't cancel early.
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Determine if we're in search mode (find-string provided)
+	searchMode := find != nil
 
 	resultCh := make(chan *string, 1)
 	var wg sync.WaitGroup
@@ -122,7 +122,7 @@ func processor(ctx context.Context, event Event) (*string, error) {
 				fmt.Println("Error retrieving object:", err)
 				return
 			}
-			if find != nil && match != nil {
+			if searchMode && match != nil {
 				select {
 				case resultCh <- match:
 					cancel() // cancel remaining work on first match
@@ -132,7 +132,7 @@ func processor(ctx context.Context, event Event) (*string, error) {
 		}()
 	}
 
-	if find == nil {
+	if !searchMode {
 		// No search requested: wait for all reads to complete, then return count
 		wg.Wait()
 		result := strconv.Itoa(len(keys))
@@ -162,24 +162,14 @@ func get(ctx context.Context, svc *s3.S3, bucketName, key string, find *string) 
 	}
 	defer response.Body.Close()
 
-	// Only read the body if we need to search within it.
+	// Fully read the body (mandatory requirement)
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, err
 	}
-	if find != nil {
-		if strings.Contains(string(b), *find) {
-			return &key, nil
-		}
+	matched := find != nil && strings.Contains(string(b), *find)
+	if matched {
+		return &key, nil
 	}
 	return nil, nil
-}
-
-func indexOfNonNil(slice []*string) *string {
-	for _, v := range slice {
-		if v != nil {
-			return v
-		}
-	}
-	return nil
 }
