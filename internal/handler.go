@@ -92,16 +92,17 @@ func processor(ctx context.Context, event Event) (*string, error) {
 		break
 	}
 
-	// If not searching for content, avoid downloads; just return count.
-	if find == nil {
-		result := strconv.Itoa(len(keys))
-		return &result, nil
-	}
+	// Always download and fully read all objects' bodies to satisfy mandatory requirements.
+	// If a find string is provided, return the first matching key; otherwise, return the count of objects.
 
-	// Search concurrently with bounded parallelism and early cancellation on first match.
 	const maxConcurrent = 32
 	sem := make(chan struct{}, maxConcurrent)
-	ctx, cancel := context.WithCancel(ctx)
+
+	// Only create a cancellable context if we might short-circuit on first match
+	var cancel context.CancelFunc = func() {}
+	if find != nil {
+		ctx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	resultCh := make(chan *string, 1)
@@ -121,16 +122,24 @@ func processor(ctx context.Context, event Event) (*string, error) {
 				fmt.Println("Error retrieving object:", err)
 				return
 			}
-			if match != nil {
+			if find != nil && match != nil {
 				select {
 				case resultCh <- match:
-					cancel() // cancel remaining work
+					cancel() // cancel remaining work on first match
 				default:
 				}
 			}
 		}()
 	}
 
+	if find == nil {
+		// No search requested: wait for all reads to complete, then return count
+		wg.Wait()
+		result := strconv.Itoa(len(keys))
+		return &result, nil
+	}
+
+	// Search mode: allow early return on first match, otherwise nil when done
 	go func() {
 		wg.Wait()
 		close(resultCh)
