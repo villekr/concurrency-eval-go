@@ -173,4 +173,3 @@ func get(ctx context.Context, svc *s3.S3, bucketName, key string, find *string) 
 	}
 	return nil, nil
 }
-
