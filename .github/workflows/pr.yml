@@ -49,3 +49,7 @@ jobs:
           # -C: cyclomatic complexity threshold (warn if function > 10)
           # -L: maximum function length (lines) threshold (warn if function > 120)
           lizard -l go -C 10 -L 120 internal/handler.go
+
+      - name: Lizard csv output
+        run: |
+          lizard -l go -C 10 -L 120 internal/handler.go --csv          
