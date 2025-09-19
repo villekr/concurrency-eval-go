@@ -69,27 +69,21 @@ func processor(ctx context.Context, event Event) (*string, error) {
 	folder := event.Folder
 	find := event.Find
 
-	// List all objects with pagination
+	// List objects once (no pagination needed) as the bucket contains at most 1000 objects per requirements
 	var keys []string
 	listObjectsParams := &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucketName),
-		Prefix: aws.String(folder),
+		Bucket:  aws.String(bucketName),
+		Prefix:  aws.String(folder),
+		MaxKeys: aws.Int64(1000),
 	}
-	for {
-		resp, err := svc.ListObjectsV2WithContext(ctx, listObjectsParams)
-		if err != nil {
-			return nil, err
+	resp, err := svc.ListObjectsV2WithContext(ctx, listObjectsParams)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range resp.Contents {
+		if obj.Key != nil {
+			keys = append(keys, *obj.Key)
 		}
-		for _, obj := range resp.Contents {
-			if obj.Key != nil {
-				keys = append(keys, *obj.Key)
-			}
-		}
-		if aws.BoolValue(resp.IsTruncated) && resp.NextContinuationToken != nil {
-			listObjectsParams.ContinuationToken = resp.NextContinuationToken
-			continue
-		}
-		break
 	}
 
 	// Always download and fully read all objects' bodies to satisfy mandatory requirements.
