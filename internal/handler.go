@@ -85,15 +85,14 @@ func newS3ExpressClient(bucketName string) *s3.S3 {
 		}
 	}
 
-	endpoint := fmt.Sprintf("https://s3express-%s.amazonaws.com", region)
-
 	sess, err := session.NewSessionWithOptions(session.Options{SharedConfigState: session.SharedConfigEnable, Config: aws.Config{Region: aws.String(region)}})
 	if err != nil {
 		panic(fmt.Errorf("failed to create AWS session for s3express: %w", err))
 	}
 
+	// Use the standard regional S3 endpoint. Explicit endpoint override is not required for directory buckets
+	// and avoids DNS issues in some environments. Path-style addressing is required.
 	svc := s3.New(sess, &aws.Config{
-		Endpoint:         aws.String(endpoint),
 		Region:           aws.String(region),
 		S3ForcePathStyle: aws.Bool(true),
 	})
