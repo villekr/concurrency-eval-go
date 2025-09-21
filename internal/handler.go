@@ -15,7 +15,6 @@ import (
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	s3v2 "github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
@@ -155,7 +154,7 @@ func processor(ctx context.Context, event Event) (*string, error) {
 	listObjectsParams := &s3v2.ListObjectsV2Input{
 		Bucket:  awsv2.String(bucketName),
 		Prefix:  awsv2.String(folder),
-		MaxKeys: 1000,
+		MaxKeys: awsv2.Int32(1000),
 	}
 	resp, err := svc.ListObjectsV2(ctx, listObjectsParams)
 	if err != nil {
