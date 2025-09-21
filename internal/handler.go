@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 )
@@ -29,20 +32,98 @@ type Response struct {
 }
 
 var (
-	s3Once   sync.Once
-	s3Client *s3.S3
+	s3Once       sync.Once
+	s3DefaultCli *s3.S3
 )
 
-func getS3Client() *s3.S3 {
+// getS3ClientForBucket returns a suitable S3 client. For standard buckets it returns a cached default client.
+// For S3 Directory Buckets (S3 Express One Zone) it returns a specially configured client that targets the
+// s3express endpoint and injects the required x-amz-region-set header.
+func getS3ClientForBucket(bucketName string) *s3.S3 {
+	if isDirectoryBucket(bucketName) {
+		return newS3ExpressClient(bucketName)
+	}
+
 	s3Once.Do(func() {
 		sess, err := session.NewSessionWithOptions(session.Options{SharedConfigState: session.SharedConfigEnable})
 		if err != nil {
 			// In Lambda, panicking here will surface as init error; subsequent calls won't proceed.
 			panic(fmt.Errorf("failed to create AWS session: %w", err))
 		}
-		s3Client = s3.New(sess)
+		s3DefaultCli = s3.New(sess)
 	})
-	return s3Client
+	return s3DefaultCli
+}
+
+func isDirectoryBucket(bucket string) bool {
+	return strings.HasSuffix(bucket, "--x-s3") && strings.Contains(bucket, "--")
+}
+
+var azIDRe = regexp.MustCompile(`--([a-z0-9-]+)--x-s3$`)
+
+func extractAZID(bucket string) (string, bool) {
+	m := azIDRe.FindStringSubmatch(bucket)
+	if len(m) == 2 {
+		return m[1], true
+	}
+	return "", false
+}
+
+func newS3ExpressClient(bucketName string) *s3.S3 {
+	azID, ok := extractAZID(bucketName)
+	if !ok {
+		// Fallback to default client if pattern not matched
+		return getS3ClientForBucket("")
+	}
+
+	region := os.Getenv("AWS_REGION")
+	if region == "" {
+		// Try derive rough region from AZ ID prefix like "eun1-az1" -> "eu-north-1"
+		region = deriveRegionFromAZID(azID)
+		if region == "" {
+			region = "us-east-1"
+		}
+	}
+
+	endpoint := fmt.Sprintf("https://s3express-%s.amazonaws.com", region)
+
+	sess, err := session.NewSessionWithOptions(session.Options{SharedConfigState: session.SharedConfigEnable, Config: aws.Config{Region: aws.String(region)}})
+	if err != nil {
+		panic(fmt.Errorf("failed to create AWS session for s3express: %w", err))
+	}
+
+	svc := s3.New(sess, &aws.Config{
+		Endpoint:         aws.String(endpoint),
+		Region:           aws.String(region),
+		S3ForcePathStyle: aws.Bool(true),
+	})
+
+	// Inject required header for directory buckets
+	svc.Handlers.Build.PushFront(func(r *request.Request) {
+		r.HTTPRequest.Header.Set("x-amz-region-set", azID)
+	})
+
+	return svc
+}
+
+func deriveRegionFromAZID(azID string) string {
+	// Minimal mapping for common regions; prefer AWS_REGION env in Lambda.
+	switch {
+	case strings.HasPrefix(azID, "use1-"):
+		return "us-east-1"
+	case strings.HasPrefix(azID, "use2-"):
+		return "us-east-2"
+	case strings.HasPrefix(azID, "usw2-"):
+		return "us-west-2"
+	case strings.HasPrefix(azID, "eun1-"):
+		return "eu-north-1"
+	case strings.HasPrefix(azID, "euw1-"):
+		return "eu-west-1"
+	case strings.HasPrefix(azID, "euc1-"):
+		return "eu-central-1"
+	default:
+		return ""
+	}
 }
 
 func HandleRequest(ctx context.Context, event Event) (*Response, error) {
@@ -64,8 +145,8 @@ func HandleRequest(ctx context.Context, event Event) (*Response, error) {
 }
 
 func processor(ctx context.Context, event Event) (*string, error) {
-	svc := getS3Client()
 	bucketName := event.S3BucketName
+	svc := getS3ClientForBucket(bucketName)
 	folder := event.Folder
 	find := event.Find
 
