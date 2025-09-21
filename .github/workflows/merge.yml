@@ -2,7 +2,7 @@ name: Merge CI
 
 on:
   push:
-    branches: [ main, "1.1" ]
+    branches: [ main, "directory-bucket3" ]
 
 jobs:
   package-and-upload:
