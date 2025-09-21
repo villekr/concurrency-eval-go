@@ -94,6 +94,7 @@ func newS3ExpressClient(bucketName string) *s3.S3 {
 	// and avoids DNS issues in some environments. Path-style addressing is required.
 	svc := s3.New(sess, &aws.Config{
 		Region:           aws.String(region),
+		SignatureVersion: aws.String("v4a"),
 		S3ForcePathStyle: aws.Bool(false),
 	})
 
