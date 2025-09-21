@@ -125,6 +125,22 @@ func deriveRegionFromAZID(azID string) string {
 	}
 }
 
+// maxConcurrency returns the worker pool size, defaulting to 64, overridable via MAX_CONCURRENCY env var (1..256).
+func maxConcurrency() int {
+	v := os.Getenv("MAX_CONCURRENCY")
+	if v == "" {
+		return 64
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 64
+	}
+	if n > 256 {
+		n = 256
+	}
+	return n
+}
+
 func HandleRequest(ctx context.Context, event Event) (*Response, error) {
 	start := time.Now()
 	result, err := processor(ctx, event)
@@ -169,8 +185,8 @@ func processor(ctx context.Context, event Event) (*string, error) {
 	// Always download and fully read all objects' bodies to satisfy mandatory requirements.
 	// If a find string is provided, return the first matching key; otherwise, return the count of objects.
 
-	const maxConcurrent = 32
-	sem := make(chan struct{}, maxConcurrent)
+	mc := maxConcurrency()
+	sem := make(chan struct{}, mc)
 
 	// Always create a cancellable context; in count mode we just won't cancel early.
 	ctx, cancel := context.WithCancel(ctx)
@@ -236,13 +252,21 @@ func get(ctx context.Context, svc *s3v2.Client, bucketName, key string, find *st
 	}
 	defer response.Body.Close()
 
-	// Fully read the body (mandatory requirement)
+	if find == nil {
+		// Count-only mode: fully read without allocating to keep memory low
+		_, err = io.Copy(io.Discard, response.Body)
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	// Search mode: read the content once and check for substring
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, err
 	}
-	matched := find != nil && strings.Contains(string(b), *find)
-	if matched {
+	if strings.Contains(string(b), *find) {
 		return &key, nil
 	}
 	return nil, nil
