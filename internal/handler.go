@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -151,7 +152,7 @@ func HandleRequest(ctx context.Context, event Event) (*Response, error) {
 
 	response := Response{
 		Lang:   "go",
-		Detail: "aws-sdk",
+		Detail: "aws-sdk-v2",
 		Result: result,
 		Time:   float32(math.Round(elapsed*10) / 10),
 	}
@@ -188,17 +189,17 @@ func processor(ctx context.Context, event Event) (*string, error) {
 	mc := maxConcurrency()
 	sem := make(chan struct{}, mc)
 
-	// Always create a cancellable context; in count mode we just won't cancel early.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	// Determine if we're in search mode (find-string provided)
 	searchMode := find != nil
 
-	resultCh := make(chan *string, 1)
 	var wg sync.WaitGroup
+	// Track first match by original index to satisfy 'first' semantics while fully reading all bodies
+	bestIdx := math.MaxInt
+	var bestKey *string
+	var mu sync.Mutex
 
-	for _, key := range keys {
+	for i, key := range keys {
+		i := i
 		k := key
 		wg.Add(1)
 		sem <- struct{}{}
@@ -213,32 +214,26 @@ func processor(ctx context.Context, event Event) (*string, error) {
 				return
 			}
 			if searchMode && match != nil {
-				select {
-				case resultCh <- match:
-					cancel() // cancel remaining work on first match
-				default:
+				mu.Lock()
+				if i < bestIdx {
+					bestIdx = i
+					bestKey = match
 				}
+				mu.Unlock()
 			}
 		}()
 	}
 
+	// Wait for all reads to complete
+	wg.Wait()
+
 	if !searchMode {
-		// No search requested: wait for all reads to complete, then return count
-		wg.Wait()
 		result := strconv.Itoa(len(keys))
 		return &result, nil
 	}
 
-	// Search mode: allow early return on first match, otherwise nil when done
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	if match, ok := <-resultCh; ok {
-		return match, nil
-	}
-	return nil, nil
+	// Return the earliest match (may be nil if none found)
+	return bestKey, nil
 }
 
 func get(ctx context.Context, svc *s3v2.Client, bucketName, key string, find *string) (*string, error) {
