@@ -1,6 +1,6 @@
 module concurrency-eval
 
-go 1.25
+go 1.25.9
 
 require (
 	github.com/aws/aws-lambda-go v1.28.0
