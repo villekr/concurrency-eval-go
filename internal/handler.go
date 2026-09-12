@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -125,20 +126,36 @@ func deriveRegionFromAZID(azID string) string {
 	}
 }
 
-// maxConcurrency returns the worker pool size, defaulting to 64, overridable via MAX_CONCURRENCY env var (1..256).
+// maxConcurrency returns the worker pool size. It uses the MAX_CONCURRENCY env var override (1..256)
+// if set; otherwise it derives the cap from the Lambda memory size using the shared formula:
+// cap = max(8, min(64, memory_MB / 32)), where memory_MB comes from AWS_LAMBDA_FUNCTION_MEMORY_SIZE
+// (default 1024 if unset).
 func maxConcurrency() int {
-	v := os.Getenv("MAX_CONCURRENCY")
-	if v == "" {
-		return 64
+	if v := os.Getenv("MAX_CONCURRENCY"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err == nil && n >= 1 {
+			if n > 256 {
+				n = 256
+			}
+			return n
+		}
 	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 {
-		return 64
+
+	memMB := 1024
+	if m := os.Getenv("AWS_LAMBDA_FUNCTION_MEMORY_SIZE"); m != "" {
+		if n, err := strconv.Atoi(m); err == nil && n > 0 {
+			memMB = n
+		}
 	}
-	if n > 256 {
-		n = 256
+
+	cap := memMB / 32
+	if cap < 8 {
+		cap = 8
 	}
-	return n
+	if cap > 64 {
+		cap = 64
+	}
+	return cap
 }
 
 func HandleRequest(ctx context.Context, event Event) (*Response, error) {
@@ -255,12 +272,12 @@ func get(ctx context.Context, svc *s3v2.Client, bucketName, key string, find *st
 		return nil, nil
 	}
 
-	// Search mode: read the content once and check for substring
+	// Search mode: fully read the body as raw bytes and search on bytes (no string decode)
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, err
 	}
-	if strings.Contains(string(b), *find) {
+	if bytes.Contains(b, []byte(*find)) {
 		return &key, nil
 	}
 	return nil, nil
